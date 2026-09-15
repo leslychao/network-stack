@@ -1,8 +1,10 @@
 """Real containers, isolated ports/state, disposable credentials and a private test CA."""
 
 import base64
+from contextlib import redirect_stdout
 import hashlib
 import hmac
+import io
 import json
 import os
 from pathlib import Path
@@ -76,6 +78,8 @@ def main():
     ports: !override ["127.0.0.1:{vpn_port}:443", "127.0.0.1:{panel_port}:2053"]
   mtg:
     ports: !override ["127.0.0.1:{mtg_port}:3128"]
+    # Public-IP discovery is optional; the real connectivity checks must still pass.
+    extra_hosts: ["ifconfig.co=127.0.0.1", "ifconfig.co=::1"]
   caddy:
     ports: !override ["127.0.0.1:{https_port}:9443"]
 x-bootstrap: {json.dumps(bootstrap_defaults)}
@@ -112,7 +116,10 @@ configs:
             values.update(INITIAL_REALITY_PRIVATE_KEY=keys[0], INITIAL_REALITY_PUBLIC_KEY=keys[1])
             private_write(env_file, dump_env(values))
             stack = Stack(repository, stack.state, project, env_file, override)
-            stack.preflight()
+            with redirect_stdout(io.StringIO()) as diagnostics:
+                stack.preflight()
+            print(diagnostics.getvalue(), end="", flush=True)
+            assert "public IP lookup unavailable" in diagnostics.getvalue(), "IP discovery failure was not exercised"
             print("Bootstrap twice: no duplicates, initial credentials work.", flush=True)
             stack.bootstrap()
             stack.command("exec", "-T", "xui", "/bin/sh", "-c",

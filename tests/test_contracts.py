@@ -92,6 +92,8 @@ class SettingsContract(unittest.TestCase):
 
 
 class MTProtoDiagnosticsContract(unittest.TestCase):
+    NO_PUBLIC_IP = ("‼️ cannot detect public IP address: cannot detect automatically "
+                    "and public-ipv4/public-ipv6 are not set in config")
     REPORT = """Deprecated options
   ✅ All good
 Time skewness
@@ -139,6 +141,28 @@ Validate SNI-DNS match
             with self.subTest(index=index), self.assertRaises(StackError) as error:
                 check_mtg_diagnostics(report)
             self.assertNotIn("sensitive-error-value", str(error.exception))
+
+    def test_unavailable_ip_lookup_does_not_block_a_working_proxy(self):
+        report = self.REPORT.replace(
+            "✅ IP address 192.0.2.1 matches secret hostname www.microsoft.com", self.NO_PUBLIC_IP)
+        with redirect_stdout(io.StringIO()) as output:
+            check_mtg_diagnostics(report)
+        self.assertIn("public IP lookup unavailable", output.getvalue())
+
+    def test_unavailable_ip_lookup_does_not_hide_other_failures(self):
+        report = self.REPORT.replace(
+            "✅ IP address 192.0.2.1 matches secret hostname www.microsoft.com", self.NO_PUBLIC_IP)
+        for original, failed in (
+            ("✅ DC 2", "❌ DC 2: sensitive-error-value"),
+            ("✅ Time drift is", "❌ Time drift is"),
+            ("✅ www.microsoft.com:443 is reachable", "❌ sensitive-error-value"),
+            (self.NO_PUBLIC_IP, "‼️ cannot resolve DNS name of sensitive-host: sensitive-error-value"),
+            (self.NO_PUBLIC_IP, "‼️ unknown failure: sensitive-error-value"),
+        ):
+            with self.subTest(original=original), self.assertRaises(StackError) as error:
+                check_mtg_diagnostics(report.replace(original, failed))
+            self.assertNotIn("sensitive-error-value", str(error.exception))
+            self.assertNotIn("sensitive-host", str(error.exception))
 
 
 class BootstrapContract(unittest.TestCase):
