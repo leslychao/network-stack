@@ -66,6 +66,18 @@ def as_object(value):
     return json.loads(value) if isinstance(value, str) else value
 
 
+def configure_subscription(panel, public_url):
+    """Expose the panel's existing subscription paths through the HTTPS proxy."""
+    settings = panel.request("/panel/api/setting/all", {})
+    for path_key, uri_key in (("subPath", "subURI"), ("subJsonPath", "subJsonURI"),
+                              ("subClashPath", "subClashURI")):
+        path = settings[path_key]
+        if not isinstance(path, str) or not path.startswith("/") or not path.endswith("/"):
+            raise StackError("Unexpected subscription path in panel settings")
+        settings[uri_key] = public_url.rstrip("/") + path
+    panel.request("/panel/api/setting/update", settings)
+
+
 def ensure_inbound(panel, expected):
     """Resume an interrupted initial POST; never overwrite a different inbound."""
     inbounds = panel.request("/panel/api/inbounds/list")

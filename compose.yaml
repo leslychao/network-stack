@@ -6,6 +6,7 @@ x-bootstrap:
   panel-url: http://127.0.0.1:2053
   panel-port: 2053
   panel-base-path: /
+  subscription-url: https://${PANEL_HOST:?PANEL_HOST is required}:9443/subscription
   inbound:
     remark: initial-vless
     port: 443
@@ -61,7 +62,7 @@ x-mtg-config: |
 services:
   xui:
     <<: *service
-    image: ghcr.io/mhsanaei/3x-ui:v3.8.0@sha256:ccc19475e8b783710ee2df7b5fd19569e084947ba3a34f0ad4790d45cbfdd4df
+    image: ghcr.io/mhsanaei/3x-ui:v3.4.2@sha256:82a85024db9695c90c5824aa1943851ae4a79963f7e31d24824d9851141d4e14
     entrypoint: [/bin/sh, -c, "umask 077; exec /app/DockerEntrypoint.sh"]
     cap_add: [NET_BIND_SERVICE]
     mem_limit: 512m
@@ -136,7 +137,12 @@ configs:
             disable_tlsalpn_challenge
           }
         }
-        reverse_proxy xui:2053
+        handle_path /subscription/* {
+          reverse_proxy xui:2096
+        }
+        handle {
+          reverse_proxy xui:2053
+        }
       }
       http://${PANEL_HOST}:80 {
         redir https://${PANEL_HOST}:9443{uri} 308

@@ -9,7 +9,7 @@ import subprocess
 import time
 import urllib.request
 
-from panel import Panel, ensure_inbound, initial_inbound
+from panel import Panel, configure_subscription, ensure_inbound, initial_inbound
 from mtg_diagnostics import check_mtg_diagnostics
 from settings import APP_FIELDS, SSH_FIELDS, StackError, private_write, read_env
 
@@ -109,6 +109,7 @@ class Stack:
             raise StackError("INITIAL_REALITY_PUBLIC_KEY does not match the private key")
         panel = Panel(defaults["panel-url"])
         panel.login(self.values["INITIAL_PANEL_USERNAME"], self.values["INITIAL_PANEL_PASSWORD"])
+        configure_subscription(panel, defaults["subscription-url"])
         ensure_inbound(panel, initial_inbound(defaults, self.values))
         panel.request("/panel/api/server/restartXrayService", {})
         panel.logout()

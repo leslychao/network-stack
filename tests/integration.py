@@ -4,6 +4,7 @@ import base64
 from contextlib import redirect_stdout
 import hashlib
 import hmac
+import http.client
 import io
 import json
 import os
@@ -64,6 +65,30 @@ def client_request(stack, link, good=True):
                   data=json.dumps(config), label="VLESS end-to-end request", timeout=30)
 
 
+def sing_box_request(stack, link, config_path, good=True):
+    address = urlsplit(link)
+    params = parse_qs(address.query)
+    config = {
+        "log": {"disabled": True},
+        "inbounds": [{"type": "socks", "listen": "0.0.0.0", "listen_port": 1080}],
+        "outbounds": [{"type": "vless", "server": "xui", "server_port": address.port,
+            "uuid": address.username if good else str(uuid.uuid4()), "flow": params["flow"][0],
+            "tls": {"enabled": True, "server_name": params["sni"][0],
+                "utls": {"enabled": True, "fingerprint": params["fp"][0]},
+                "reality": {"enabled": True, "public_key": params["pbk"][0],
+                            "short_id": params["sid"][0]}}}],
+    }
+    private_write(config_path, json.dumps(config))
+    try:
+        stack.command("up", "-d", "singbox", label="Start sing-box test client")
+        time.sleep(2)
+        stack.command("exec", "-T", "xui", "curl", "--silent", "--fail", "--max-time", "15",
+                      "--socks5-hostname", "singbox:1080", "--output", "/dev/null", "https://example.com/",
+                      label="sing-box VLESS end-to-end request", timeout=25)
+    finally:
+        stack.command("rm", "--stop", "--force", "singbox", label="Stop sing-box test client")
+
+
 def main():
     repository = Path(__file__).resolve().parents[1]
     work = repository / ".work"
@@ -74,10 +99,17 @@ def main():
         ports = [free_port() for _ in range(4)]
         panel_port, vpn_port, mtg_port, https_port = ports
         env_file, override = directory / ".env", directory / "override.yaml"
+        singbox_config = directory / "singbox.json"
         values = sample_values()
         private_write(env_file, dump_env(values))
         production = Stack(repository, directory / "state", project, env_file)
-        bootstrap_defaults = production.model["x-bootstrap"] | {"panel-url": f"http://127.0.0.1:{panel_port}"}
+        # Exercise production routes; replace only the certificate issuer for isolation.
+        test_caddy, issuer_count = re.subn(r"(?m)^(\s*)tls \{\n[\s\S]*?^\1\}", r"\1tls internal",
+                                         production.model["configs"]["caddy"]["content"])
+        assert issuer_count == 1, "Expected one production TLS issuer"
+        bootstrap_defaults = production.model["x-bootstrap"] | {
+            "panel-url": f"http://127.0.0.1:{panel_port}",
+            "subscription-url": f"https://{values['PANEL_HOST']}:{https_port}/subscription"}
         override.write_text(f'''services:
   xui:
     ports: !override ["127.0.0.1:{vpn_port}:443", "127.0.0.1:{panel_port}:2053"]
@@ -87,21 +119,19 @@ def main():
     extra_hosts: ["ifconfig.co=127.0.0.1", "ifconfig.co=::1"]
   caddy:
     ports: !override ["127.0.0.1:{https_port}:9443"]
+  singbox:
+    image: ghcr.io/sagernet/sing-box:v1.14.0@sha256:4bed9332a0013fef72c31200a84e8fc0ed91a5ab2fe373a69f0acbbbbfbef3c5
+    profiles: [test]
+    command: [run, -c, /etc/sing-box/config.json]
+    volumes:
+      - type: bind
+        source: {json.dumps(str(singbox_config))}
+        target: /etc/sing-box/config.json
+        read_only: true
 x-bootstrap: {json.dumps(bootstrap_defaults)}
 configs:
   caddy:
-    content: |
-      {{
-        default_sni {values["PANEL_HOST"]}
-        auto_https disable_redirects
-        servers {{
-          protocols h1 h2
-        }}
-      }}
-      https://{values["PANEL_HOST"]}:9443 {{
-        tls internal
-        reverse_proxy xui:2053
-      }}
+    content: {json.dumps(test_caddy)}
 ''', encoding="utf-8")
         stack = Stack(repository, directory / "state", project, env_file, override)
         try:
@@ -147,8 +177,45 @@ configs:
             panel.login(values["INITIAL_PANEL_USERNAME"], values["INITIAL_PANEL_PASSWORD"])
             links = panel.request("/panel/api/inbounds/allLinks")
             assert len(links) == 1 and links[0].startswith("vless://"), "Expected one VLESS share link"
+            subscription_settings = panel.request("/panel/api/setting/all", {})
+            subscription_id = values["INITIAL_VLESS_UUID"].replace("-", "")
+            subscription_url = subscription_settings["subURI"] + subscription_id
+            subscription = urlsplit(subscription_url)
+            assert subscription.scheme == "https" and subscription.port == https_port, "HTTPS subscription URL"
+            assert subscription.path.startswith("/subscription/"), "Subscription proxy path"
+            # Connect locally while verifying the same IP certificate as a public subscriber.
+            def fetch_subscription(path):
+                with socket.create_connection(("127.0.0.1", https_port), timeout=5) as connection:
+                    with context.wrap_socket(connection, server_hostname=values["PANEL_HOST"]) as tls:
+                        tls.sendall(f"GET {path} HTTP/1.1\r\nHost: {values['PANEL_HOST']}:{https_port}\r\n"
+                                    "Accept: text/plain\r\nConnection: close\r\n\r\n".encode())
+                        response = http.client.HTTPResponse(tls)
+                        response.begin()
+                        return response.status, response.read(4 * 1024 * 1024)
+            status, body = fetch_subscription(subscription.path)
+            assert status == 200, "HTTPS subscription is unavailable"
+            exported_links = base64.b64decode(body).decode().splitlines()
+            assert len(exported_links) == len(links), "Subscription client count differs from panel"
+            for exported, direct in zip(exported_links, links):
+                exported_uri, direct_uri = urlsplit(exported), urlsplit(direct)
+                assert exported_uri._replace(query="") == direct_uri._replace(query=""), "Subscription endpoint or client differs"
+                exported_params, direct_params = parse_qs(exported_uri.query), parse_qs(direct_uri.query)
+                # 3x-ui 3.4.2 generates a new random spider path for each export.
+                for params in (exported_params, direct_params):
+                    assert params.pop("spx")[0].startswith("/"), "Expected a REALITY spider path"
+                assert exported_params == direct_params, "Subscription credentials or transport differ"
+            status, _ = fetch_subscription(subscription.path.rsplit("/", 1)[0] + "/" + uuid.uuid4().hex)
+            assert status == 404, "Unknown subscription must not expose client access"
             print("Panel share link uses TCP/Vision, carries HTTPS; incorrect UUID is rejected.", flush=True)
-            client_request(stack, links[0])
+            client_request(stack, exported_links[0])
+            print("sing-box 1.14.0 connects using the panel subscription; incorrect UUID is rejected.", flush=True)
+            sing_box_request(stack, exported_links[0], singbox_config)
+            try:
+                sing_box_request(stack, exported_links[0], singbox_config, good=False)
+            except StackError:
+                pass
+            else:
+                raise StackError("sing-box VLESS accepted an incorrect UUID")
             try:
                 client_request(stack, links[0], good=False)
             except StackError:
