@@ -18,7 +18,8 @@ x-bootstrap:
       decryption: none
       encryption: none
     streamSettings:
-      network: raw
+      # 3x-ui uses tcp for its TCP (Raw) transport and Vision share links.
+      network: tcp
       security: reality
       realitySettings:
         show: false

@@ -16,6 +16,7 @@ import sys
 import tempfile
 import time
 import uuid
+from urllib.parse import parse_qs, urlsplit
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
@@ -37,18 +38,22 @@ def totp(secret):
     return f"{(struct.unpack('>I', digest[offset:offset + 4])[0] & 0x7fffffff) % 1000000:06d}"
 
 
-def client_request(stack, good=True):
-    defaults, values = stack.model["x-bootstrap"], stack.values
-    reality = defaults["inbound"]["streamSettings"]["realitySettings"]
+def client_request(stack, link, good=True):
+    address = urlsplit(link)
+    params = parse_qs(address.query)
+    assert address.hostname == stack.values["PANEL_HOST"] and address.port == 443, "Share-link endpoint"
+    assert params.get("type") == ["tcp"], "Share link must use the client-compatible TCP transport"
+    assert params.get("flow") == ["xtls-rprx-vision"], "Share link must include Vision"
     config = {
         "log": {"loglevel": "none"},
         "inbounds": [{"listen": "127.0.0.1", "port": 1080, "protocol": "socks", "settings": {"auth": "noauth"}}],
-        "outbounds": [{"protocol": "vless", "settings": {"vnext": [{"address": "xui", "port": 443,
-            "users": [{"id": values["INITIAL_VLESS_UUID"] if good else str(uuid.uuid4()),
-                       "encryption": "none", "flow": "xtls-rprx-vision"}]}]},
-            "streamSettings": {"network": "raw", "security": "reality", "realitySettings": {
-                "serverName": reality["serverNames"][0], "fingerprint": "chrome",
-                "password": values["INITIAL_REALITY_PUBLIC_KEY"], "shortId": values["INITIAL_REALITY_SHORT_ID"]}}}],
+        # Only the public IP is replaced by the service name inside the isolated Docker network.
+        "outbounds": [{"protocol": "vless", "settings": {"vnext": [{"address": "xui", "port": address.port,
+            "users": [{"id": address.username if good else str(uuid.uuid4()),
+                       "encryption": params["encryption"][0], "flow": params["flow"][0]}]}]},
+            "streamSettings": {"network": params["type"][0], "security": params["security"][0], "realitySettings": {
+                "serverName": params["sni"][0], "fingerprint": params["fp"][0],
+                "password": params["pbk"][0], "shortId": params["sid"][0]}}}],
     }
     script = ('cat > /tmp/client.json; set -- /app/bin/xray-linux-*; '
               '"$@" run -config /tmp/client.json >/dev/null 2>&1 & pid=$!; '
@@ -138,16 +143,18 @@ configs:
             context = ssl.create_default_context(cafile=str(stack.state / "caddy-data/caddy/pki/authorities/local/root.crt"))
             with patch("stack.ssl.create_default_context", return_value=context):
                 wait_for(stack.https_ready, "TLS panel with trusted test CA")
-            print("VLESS carries HTTPS; incorrect UUID is rejected.", flush=True)
-            client_request(stack)
+            panel = Panel(stack.model["x-bootstrap"]["panel-url"])
+            panel.login(values["INITIAL_PANEL_USERNAME"], values["INITIAL_PANEL_PASSWORD"])
+            links = panel.request("/panel/api/inbounds/allLinks")
+            assert len(links) == 1 and links[0].startswith("vless://"), "Expected one VLESS share link"
+            print("Panel share link uses TCP/Vision, carries HTTPS; incorrect UUID is rejected.", flush=True)
+            client_request(stack, links[0])
             try:
-                client_request(stack, good=False)
+                client_request(stack, links[0], good=False)
             except StackError:
                 pass
             else:
                 raise StackError("VLESS accepted an incorrect UUID")
-            panel = Panel(stack.model["x-bootstrap"]["panel-url"])
-            panel.login(values["INITIAL_PANEL_USERNAME"], values["INITIAL_PANEL_PASSWORD"])
             panel.request("/panel/api/server/stopXrayService", {})
             try:
                 stack.xray_ready()
