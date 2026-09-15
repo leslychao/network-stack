@@ -62,7 +62,7 @@ x-mtg-config: |
 services:
   xui:
     <<: *service
-    image: ghcr.io/mhsanaei/3x-ui:v3.4.2@sha256:82a85024db9695c90c5824aa1943851ae4a79963f7e31d24824d9851141d4e14
+    image: ghcr.io/mhsanaei/3x-ui:v3.7.0@sha256:3b3131f1876e6bf35063a9ec4dd1c594e4525180bfc2e1c477dcc8a3c9550ca1
     entrypoint: [/bin/sh, -c, "umask 077; exec /app/DockerEntrypoint.sh"]
     cap_add: [NET_BIND_SERVICE]
     mem_limit: 512m

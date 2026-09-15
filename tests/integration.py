@@ -200,7 +200,7 @@ configs:
                 exported_uri, direct_uri = urlsplit(exported), urlsplit(direct)
                 assert exported_uri._replace(query="") == direct_uri._replace(query=""), "Subscription endpoint or client differs"
                 exported_params, direct_params = parse_qs(exported_uri.query), parse_qs(direct_uri.query)
-                # 3x-ui 3.4.2 generates a new random spider path for each export.
+                # 3x-ui generates a new random spider path for each export.
                 for params in (exported_params, direct_params):
                     assert params.pop("spx")[0].startswith("/"), "Expected a REALITY spider path"
                 assert exported_params == direct_params, "Subscription credentials or transport differ"
